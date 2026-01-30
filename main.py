@@ -166,22 +166,38 @@ def trigger_remote_action():
         print("⚠️ 未发现 PAT_TOKEN，联动跳过。")
         return
     
-    print(f"🚀 正在触发 {TARGET_REPO} 的 {TARGET_WORKFLOW}...")
-    # API 地址指向特定的 workflow 文件
+    # 根据你的检查结果，这里可以填 "main" 或 "master"
+    # 如果不确定，通常报错 "No ref found" 就是因为分支名对不上
+    target_branch = "main" 
+    
+    print(f"🚀 正在触发 {TARGET_REPO} 的 {TARGET_WORKFLOW} (分支: {target_branch})...")
     url = f"https://api.github.com/repos/{TARGET_REPO}/actions/workflows/{TARGET_WORKFLOW}/dispatches"
     
     headers = {
         "Authorization": f"token {TRIGGER_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Python-Request" # 增加 UA 提高兼容性
     }
     
-    # workflow_dispatch 必须指定分支 ref
-    data = {"ref": "main"} 
+    data = {"ref": target_branch} 
     
     try:
         r = requests.post(url, headers=headers, json=data)
+        
+        # 成功状态码是 204
         if r.status_code == 204:
-            print("🎉 成功：JE668/iptv-api 的 main.yml 已开始运行！")
+            print("🎉 成功：目标仓库 Action 已被激活！")
+        elif r.status_code == 422:
+            print(f"❌ 触发失败 (422)：分支名 '{target_branch}' 可能不对，或者目标 YAML 没开 workflow_dispatch。")
+            # 自动尝试一次 master
+            if target_branch == "main":
+                print("🔄 尝试切换分支为 'master' 再次触发...")
+                data["ref"] = "master"
+                r2 = requests.post(url, headers=headers, json=data)
+                if r2.status_code == 204:
+                    print("🎉 成功：通过 'master' 分支激活成功！")
+                else:
+                    print(f"❌ 最终失败：{r2.status_code}, {r2.text}")
         else:
             print(f"❌ 触发失败：{r.status_code}, {r.text}")
     except Exception as e:
