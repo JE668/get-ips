@@ -168,7 +168,7 @@ def trigger_remote_action():
     
     # 根据你的检查结果，这里可以填 "main" 或 "master"
     # 如果不确定，通常报错 "No ref found" 就是因为分支名对不上
-    target_branch = "main" 
+    target_branch = "master" 
     
     print(f"🚀 正在触发 {TARGET_REPO} 的 {TARGET_WORKFLOW} (分支: {target_branch})...")
     url = f"https://api.github.com/repos/{TARGET_REPO}/actions/workflows/{TARGET_WORKFLOW}/dispatches"
