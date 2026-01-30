@@ -13,6 +13,11 @@ HEADERS = {
     "Cookie": os.environ.get("FOFA_COOKIE", "") 
 }
 
+# 联动配置
+TARGET_REPO = "JE668/iptv-api"
+TARGET_WORKFLOW = "main.yml"  # 目标工作流文件名
+TRIGGER_TOKEN = os.environ.get("PAT_TOKEN", "") # 从 Secrets 读取 PAT
+
 # 按照要求重命名文件
 SOURCE_IP_FILE = "source-ip.txt"
 SOURCE_M3U_FILE = "source-m3u.txt"
@@ -155,6 +160,34 @@ def stage_3_combine(final_ips):
             f.write("\n".join(list(set(combined))))
         print(f"✅ {SOURCE_M3U_FILE} 已保存 ({len(combined)} 条)")
 
+def trigger_remote_action():
+    """触发目标仓库的 main.yml"""
+    if not TRIGGER_TOKEN:
+        print("⚠️ 未发现 PAT_TOKEN，联动跳过。")
+        return
+    
+    print(f"🚀 正在触发 {TARGET_REPO} 的 {TARGET_WORKFLOW}...")
+    # API 地址指向特定的 workflow 文件
+    url = f"https://api.github.com/repos/{TARGET_REPO}/actions/workflows/{TARGET_WORKFLOW}/dispatches"
+    
+    headers = {
+        "Authorization": f"token {TRIGGER_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    # workflow_dispatch 必须指定分支 ref
+    data = {"ref": "main"} 
+    
+    try:
+        r = requests.post(url, headers=headers, json=data)
+        if r.status_code == 204:
+            print("🎉 成功：JE668/iptv-api 的 main.yml 已开始运行！")
+        else:
+            print(f"❌ 触发失败：{r.status_code}, {r.text}")
+    except Exception as e:
+        print(f"❌ 联动异常：{e}")
+
+
 def push():
     print("⬆️ 同步到 GitHub...")
     os.system("git config --global user.name 'github-actions[bot]'")
@@ -179,6 +212,8 @@ if __name__ == "__main__":
             stage_3_combine(online_list)
             # 4. 推送
             push()
+            # 只有在本地推送成功后才去触发远程
+            trigger_remote_action()
         else:
             print("❌ 验证结果为空，不执行推送。")
     else:
