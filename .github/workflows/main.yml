@@ -1,40 +1,33 @@
-name: IPTV Zhongshan Update
+name: IPTV Update
 
 on:
   schedule:
-    # 每天北京时间早上 6:00 运行一次 (UTC 22:00)
     - cron: '0 10,22 * * *'
-  workflow_dispatch: # 允许手动触发运行
+  workflow_dispatch:
+
+# 必须添加以下权限配置，解决 403 错误
+permissions:
+  contents: write
 
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: Install Dependencies
+      - name: Install
         run: |
           pip install requests
           sudo apt-get update
-          sudo apt-get install -y ffmpeg # 必须安装 ffmpeg 才能运行 ffprobe
+          sudo apt-get install -y ffmpeg
 
-      - name: Run Update Script
+      - name: Run
         env:
-          # 在 GitHub Repo 的 Settings -> Secrets 中添加 FOFA_COOKIE
           FOFA_COOKIE: ${{ secrets.FOFA_COOKIE }}
         run: python main.py
-
-      - name: Pull changes before push # 预防并发提交冲突
-        run: git pull origin main --rebase
-
-      - name: Upload result
-        # 由于 Python 脚本中已经包含了 git push 逻辑
-        # 这里仅作为脚本异常时的兜底（可选）
-        run: echo "Update completed."
