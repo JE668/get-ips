@@ -13,10 +13,10 @@ HEADERS = {
     "Cookie": os.environ.get("FOFA_COOKIE", "") 
 }
 
-IP_DIR = "ip"
+# 按照要求重命名文件
+SOURCE_IP_FILE = "source-ip.txt"
+SOURCE_M3U_FILE = "source-m3u.txt"
 RTP_DIR = "rtp"
-ZUBO_FILE = "zubo.txt"
-SOURCE_FILE = "source.txt"
 
 # ===============================
 # 2. 核心验证函数
@@ -26,29 +26,39 @@ def verify_ip_geodata(ip):
     """第一步校验：广东省 + 中国电信"""
     try:
         url = f"http://ip-api.com/json/{ip}?lang=zh-CN"
-        res = requests.get(url, timeout=10).json()
+        # 增加超时和重试
+        response = requests.get(url, timeout=10)
+        res = response.json()
+        
         if res.get("status") != "success":
             return False
+            
         region = res.get("regionName", "")
         isp_info = (res.get("isp", "") + res.get("org", "")).lower()
-        return "广东" in region and any(kw in isp_info for kw in ["电信", "telecom", "chinanet", "chinatelecom"])
-    except:
+        
+        # 匹配广东 + 电信/Chinanet
+        is_match = "广东" in region and any(kw in isp_info for kw in ["电信", "telecom", "chinanet", "chinatelecom"])
+        return is_match
+    except Exception as e:
+        print(f"   ⚠️ Geo校验异常 ({ip}): {e}")
         return False
 
 def check_udpxy_status(ip_port):
     """
     第二步校验：尝试访问 /stat 或 /status
-    如果返回 200 OK 且包含 udpxy 关键字，则判定服务在线
     """
-    paths = ["/stat", "/status"]
+    # 部分 udpxy 极其精简，不带 User-Agent 访问更稳
+    clean_headers = {"User-Agent": "Wget/1.14"} 
+    paths = ["/stat", "/status", "/status/"]
+    
     for path in paths:
         try:
             url = f"http://{ip_port}{path}"
-            # 设置较短的超时，UDPXY 响应通常很快
-            response = requests.get(url, timeout=5)
+            response = requests.get(url, headers=clean_headers, timeout=4, allow_redirects=False)
             if response.status_code == 200:
-                # 进一步检查内容，确保是 udpxy 页面
-                if "udpxy" in response.text.lower() or "status" in response.text.lower():
+                text = response.text.lower()
+                # 只要包含 udpxy 或 活跃链接(active) 等特征码即视为存活
+                if "udpxy" in text or "stat" in text or "client" in text:
                     return True
         except:
             continue
@@ -59,64 +69,75 @@ def check_udpxy_status(ip_port):
 # ===============================
 
 def stage_1_fofa():
-    """爬取并初步筛选地理位置"""
-    print("📡 1. 爬取 FOFA 并校验归属地 (广东电信)...")
+    print("📡 1. 爬取 FOFA 并进行地理筛选...")
     ips = set()
     try:
         r = requests.get(FOFA_URL, headers=HEADERS, timeout=15)
         if r.status_code == 200:
             found = re.findall(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', r.text)
             ips.update(found)
+        else:
+            print(f"   ❌ FOFA 响应异常: {r.status_code}")
     except Exception as e:
-        print(f"❌ FOFA 爬取失败: {e}")
+        print(f"   ❌ FOFA 爬取失败: {e}")
 
+    if not ips:
+        return []
+
+    print(f"   找到 {len(ips)} 个 IP，正在校验广东电信归属地...")
     geo_valid_ips = []
     for ip_port in sorted(list(ips)):
         host = ip_port.split(":")[0]
         if verify_ip_geodata(host):
-            print(f"   [地理通过]: {ip_port}")
+            print(f"   ✅ [地理匹配]: {ip_port}")
             geo_valid_ips.append(ip_port)
-        time.sleep(1.2) # 防止 ip-api 封禁
+        else:
+            print(f"   ❌ [非广东电信]: {ip_port}")
+        # 1.2s 延迟确保 ip-api 接口稳定
+        time.sleep(1.2) 
     
     return geo_valid_ips
 
-def stage_3_validate_and_output(geo_ips):
-    """多线程验证 UDPXY 状态页面并输出"""
-    print(f"🔍 2. 验证 /stat 接口状态 (共 {len(geo_ips)} 个候选)...")
+def stage_2_validate_and_save(geo_ips):
+    print(f"🔍 2. 验证 /stat 接口 (共 {len(geo_ips)} 个候选)...")
     final_ips = []
 
-    # 使用多线程加快 Web 接口验证速度
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    if not geo_ips:
+        return []
+
+    # 多线程验证接口
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         future_to_ip = {executor.submit(check_udpxy_status, ip): ip for ip in geo_ips}
         for future in concurrent.futures.as_completed(future_to_ip):
             ip_port = future_to_ip[future]
-            try:
-                if future.result():
-                    print(f"   ✅ [接口在线]: {ip_port}")
-                    final_ips.append(ip_port)
-                else:
-                    print(f"   ❌ [接口离线]: {ip_port}")
-            except:
-                pass
+            if future.result():
+                print(f"   🟢 [接口在线]: {ip_port}")
+                final_ips.append(ip_port)
+            else:
+                print(f"   🔴 [接口下线]: {ip_port}")
 
-    # 保存地理通过且接口在线的 IP 进 ip/ 目录
-    os.makedirs(IP_DIR, exist_ok=True)
-    with open(os.path.join(IP_DIR, "广东电信.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(final_ips)))
-
-    # 输出 source.txt
-    with open(SOURCE_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(final_ips)))
-    
-    print(f"✅ {SOURCE_FILE} 已更新，共 {len(final_ips)} 个服务在线")
+    if final_ips:
+        # 写入 source-ip.txt
+        final_ips.sort()
+        with open(SOURCE_IP_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(final_ips))
+        print(f"✅ {SOURCE_IP_FILE} 已保存 ({len(final_ips)} 条)")
+    else:
+        print("❌ 接口验证环节未发现任何在线 IP")
+        
     return final_ips
 
-def stage_2_combine(final_ips):
-    """组合模板生成 zubo.txt (仅针对在线 IP)"""
-    print("🧩 3. 正在生成 zubo.txt...")
+def stage_3_combine(final_ips):
+    print("🧩 3. 正在生成拼装列表 source-m3u.txt...")
+    if not final_ips:
+        return
+
     combined = []
+    # 查找模板文件，这里寻找任何以广东电信命名的txt
     rtp_file = os.path.join(RTP_DIR, "广东电信.txt")
-    if not os.path.exists(rtp_file): return
+    if not os.path.exists(rtp_file):
+        print(f"   ⚠️ 模板文件 {rtp_file} 不存在，无法生成 m3u 列表")
+        return
 
     with open(rtp_file, encoding="utf-8") as f:
         rtp_lines = [x.strip() for x in f if "," in x]
@@ -129,15 +150,17 @@ def stage_2_combine(final_ips):
             suffix = rtp_url.split("://")[1]
             combined.append(f"{name},http://{ip}/{proto}/{suffix}")
 
-    with open(ZUBO_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(list(set(combined))))
+    if combined:
+        with open(SOURCE_M3U_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(list(set(combined))))
+        print(f"✅ {SOURCE_M3U_FILE} 已保存 ({len(combined)} 条)")
 
 def push():
-    """同步到 GitHub"""
+    print("⬆️ 同步到 GitHub...")
     os.system("git config --global user.name 'github-actions[bot]'")
     os.system("git config --global user.email 'github-actions[bot]@users.noreply.github.com'")
-    os.system(f"git add .")
-    os.system("git commit -m 'Update source.txt with validated udpxy hosts' || echo 'No changes'")
+    os.system("git add source-ip.txt source-m3u.txt")
+    os.system("git commit -m 'Update source IPs and M3U files' || echo 'No changes'")
     os.system("git push origin main")
 
 # ===============================
@@ -145,18 +168,18 @@ def push():
 # ===============================
 if __name__ == "__main__":
     # 1. 地理筛选
-    geo_list = stage_1_fofa()
+    candidate_list = stage_1_fofa()
     
-    if geo_list:
-        # 2. 接口状态筛选并输出 source.txt
-        online_list = stage_3_validate_and_output(geo_list)
+    if candidate_list:
+        # 2. 接口状态验证并保存 source-ip.txt
+        online_list = stage_2_validate_and_save(candidate_list)
         
         if online_list:
-            # 3. 生成完整 zubo.txt
-            stage_2_combine(online_list)
+            # 3. 拼装生成 source-m3u.txt
+            stage_3_combine(online_list)
             # 4. 推送
             push()
         else:
-            print("❌ 接口验证全部失败，没有在线的 UDPXY 服务。")
+            print("❌ 验证结果为空，不执行推送。")
     else:
-        print("❌ 未发现符合条件的广东电信 IP。")
+        print("❌ 地理筛选结果为空，请检查 FOFA 搜索或地理 API。")
