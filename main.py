@@ -9,7 +9,6 @@ from datetime import datetime, timezone, timedelta
 # ===============================
 # 1. 配置区
 # ===============================
-# FOFA 搜索链接
 FOFA_URL = "https://fofa.info/result?qbase64=IlVEUFhZIiAmJiBjb3VudHJ5PSJDTiIgJiYgcmVnaW9uPSJHdWFuZ2RvbmciICYmIGNpdHk9Ilpob25nc2hhbiI%3D"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -177,18 +176,23 @@ CHANNEL_MAPPING = {
 # ===============================
 
 # ===============================
-# 2. 地理与有效性检测函数
+# 2. 工具函数
 # ===============================
 
 def verify_ip_geodata(ip):
-    """
-    放宽校验：仅要求 广东省 + 中国电信
-    """
+    """校验：广东 + 电信 (包含 Chinanet)"""
     try:
-        # ip-api.com 免费版限制 45次/分钟
-        url = f"http://ip-api.com/json/{ip}?lang=zh-CN"
-        res = requests.get(url, timeout=8).json()
-        
+        # 增加重试逻辑处理 API 报错
+        for _ in range(2):
+            url = f"http://ip-api.com/json/{ip}?lang=zh-CN"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                res = response.json()
+                break
+            time.sleep(2)
+        else:
+            return False
+            
         if res.get("status") != "success":
             return False
 
@@ -196,15 +200,14 @@ def verify_ip_geodata(ip):
         isp = res.get("isp", "")
         org = res.get("org", "")
 
-        # 校验逻辑：仅匹配广东 + 电信
-        is_guangdong = "广东" in region
         isp_info = (isp + org).lower()
-        is_telecom = any(kw in isp_info for kw in ["电信", "telecom", "chinatelecom"])
+        # 关键修改：增加 chinanet 识别
+        is_guangdong = "广东" in region
+        is_telecom = any(kw in isp_info for kw in ["电信", "telecom", "chinanet", "chinatelecom"])
 
         if is_guangdong and is_telecom:
             return True
         else:
-            # 方便在日志中查看被过滤的 IP 情况
             print(f"   [过滤] IP: {ip} | 地区: {region} | 运营商: {isp}")
             return False
     except Exception as e:
@@ -212,7 +215,6 @@ def verify_ip_geodata(ip):
     return False
 
 def check_stream(url, timeout=5):
-    """使用 ffprobe 检测信号有效性"""
     try:
         cmd = ["ffprobe", "-v", "error", "-show_streams", "-i", url]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout+2)
@@ -221,25 +223,20 @@ def check_stream(url, timeout=5):
         return False
 
 # ===============================
-# 3. 三大核心阶段
+# 3. 核心阶段
 # ===============================
 
 def stage_1_fofa():
-    """第一阶段：爬取并筛选 IP"""
-    print("📡 1. 开始爬取 FOFA (广东电信)...")
+    print("📡 1. 开始爬取 FOFA...")
     ips = set()
     session = requests.Session()
-    
-    for i in range(3):
-        try:
-            r = session.get(FOFA_URL, headers=HEADERS, timeout=15)
-            if r.status_code == 200 and len(r.text) > 1000:
-                found = re.findall(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', r.text)
-                ips.update(found)
-                break
-        except:
-            print(f"   retry {i+1}...")
-            time.sleep(3)
+    try:
+        r = session.get(FOFA_URL, headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            found = re.findall(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', r.text)
+            ips.update(found)
+    except Exception as e:
+        print(f"❌ 爬取失败: {e}")
 
     print(f"   [抓取结果]: 找到 {len(ips)} 个地址，执行广东电信筛选...")
     
@@ -249,26 +246,22 @@ def stage_1_fofa():
         if verify_ip_geodata(host):
             print(f"   ✅ 匹配: {ip_port}")
             valid_ips.append(ip_port)
-        # 需求：0.5s 延迟
-        time.sleep(0.5) 
+        # 增加到 1.5s 延迟，防止被 ip-api 封禁
+        time.sleep(1.5) 
     
     os.makedirs(IP_DIR, exist_ok=True)
-    # 文件名统一为广东电信
-    target_path = os.path.join(IP_DIR, "广东电信.txt")
-    with open(target_path, "w", encoding="utf-8") as f:
+    with open(os.path.join(IP_DIR, "广东电信.txt"), "w", encoding="utf-8") as f:
         for ip in valid_ips:
             f.write(ip + "\n")
-    print(f"✅ 阶段一完成。合格 IP 数量: {len(valid_ips)}")
+    return len(valid_ips)
 
 def stage_2_combine():
-    """第二阶段：地址组合"""
-    print("🧩 2. 正在生成 zubo.txt (组合模板)...")
+    print("🧩 2. 组合模板...")
     combined = []
     ip_file = os.path.join(IP_DIR, "广东电信.txt")
     rtp_file = os.path.join(RTP_DIR, "广东电信.txt")
     
     if not (os.path.exists(ip_file) and os.path.exists(rtp_file)):
-        print("⚠️  跳过：缺少广东电信的 IP 或 RTP 模板文件")
         return
 
     with open(ip_file) as f1, open(rtp_file) as f2:
@@ -283,17 +276,12 @@ def stage_2_combine():
                 suffix = rtp_url.split("://")[1]
                 combined.append(f"{name},http://{ip}/{proto}/{suffix}")
 
-    # 去重
-    unique_lines = list(set(combined))
     with open(ZUBO_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(unique_lines))
-    print(f"🎯 组合完成，共生成 {len(unique_lines)} 条记录")
+        f.write("\n".join(list(set(combined))))
 
 def stage_3_verify():
-    """第三阶段：测速并生成 IPTV.txt"""
-    print("🚀 3. 启动多线程有效性检测...")
+    print("🚀 3. 检测有效性...")
     if not os.path.exists(ZUBO_FILE): return
-
     with open(ZUBO_FILE) as f:
         entries = [line.strip() for line in f if "," in line]
 
@@ -304,7 +292,6 @@ def stage_3_verify():
 
     playable_ips = set()
     def check_ip(ip, urls):
-        # 抽检 CCTV1
         test_url = next((u.split(",")[1] for u in urls if "CCTV1" in u), urls[0].split(",")[1])
         return ip if check_stream(test_url) else None
 
@@ -314,7 +301,6 @@ def stage_3_verify():
             res = f.result()
             if res: playable_ips.add(res)
 
-    # 导出 IPTV.txt
     beijing_now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     with open(IPTV_FILE, "w", encoding="utf-8") as f:
         f.write(f"更新时间,#genre#\n{beijing_now},http://0.0.0.0/info.m3u8\n\n")
@@ -326,23 +312,19 @@ def stage_3_verify():
                     if ch_name == name and url.split("/")[2] in playable_ips:
                         f.write(f"{ch_name},{url}\n")
             f.write("\n")
-    print(f"✅ IPTV.txt 已更新，有效 IP 数: {len(playable_ips)}")
 
 def push():
-    """Git 提交并推送"""
-    os.system("git config --global user.name 'IPTV-Update-Bot'")
-    os.system("git config --global user.email 'bot@iptv.com'")
-    # 添加所有变动文件
-    os.system(f"git add {IP_DIR}/*.txt {ZUBO_FILE} {IPTV_FILE}")
-    os.system("git commit -m 'Auto update: Guangdong Telecom' || echo 'No changes'")
-    os.system("git push origin main")
+    os.system("git config --global user.name 'github-actions[bot]'")
+    os.system("git config --global user.email 'github-actions[bot]@users.noreply.github.com'")
+    os.system("git add .")
+    os.system("git commit -m 'Auto update IPTV' || echo 'No changes'")
+    os.system("git push")
 
-# ===============================
-# 执行入口
-# ===============================
 if __name__ == "__main__":
-    # 按照需求：每次运行都执行全量流程
-    stage_1_fofa()      # 获取并筛选 IP
-    stage_2_combine()   # 拼装播放地址
-    stage_3_verify()    # ffprobe 检测并保存
-    push()              # 推送到 GitHub
+    count = stage_1_fofa()
+    if count > 0:
+        stage_2_combine()
+        stage_3_verify()
+        push()
+    else:
+        print("❌ 未发现有效 IP，停止后续流程。")
