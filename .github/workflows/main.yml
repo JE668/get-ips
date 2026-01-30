@@ -30,4 +30,5 @@ jobs:
       - name: Run
         env:
           FOFA_COOKIE: ${{ secrets.FOFA_COOKIE }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }} # 必须传入环境变量
         run: python main.py
