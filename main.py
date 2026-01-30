@@ -93,8 +93,8 @@ def stage_1_fofa():
             geo_valid_ips.append(ip_port)
         else:
             print(f"   ❌ [非广东电信]: {ip_port}")
-        # 1.2s 延迟确保 ip-api 接口稳定
-        time.sleep(1.2) 
+        # 1.5s 延迟确保 ip-api 接口稳定
+        time.sleep(1.5) 
     
     return geo_valid_ips
 
